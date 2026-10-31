@@ -1,8 +1,12 @@
 /*
   NEEEIL-IT | ANC para ruido impulsivo | Arduino IDE / Raspberry Pi Pico RP2040
-  Tres modos: 0 FxLMS normal; 1 FxLMS com clipping; 2 FxLMS com thresholding.
+  3 modos: 0 FxLMS normal; 1 FxLMS com clipping; 2 FxLMS com thresholding.
   microfone de referencia GP26 (ADC0), microfone de erro GP27 (ADC1),
   GP15 PWM -> filtro RC passa-baixo e amplificador de audio externo.
+
+  oi malta, explorei 3 tipos de fxlms como viram acima. numa pesquisa teorica, acredito que o com clipping (1) podera ser o de mais facil implementação
+  e de maior eficiencia. no entanto, é algo que so iremos saber após efetuarmos os testes. por esse motivo, optei por analisar e escrever os 3 metodos.
+  para testar cada um deles, muda-se o define da linha 131 e done :)
 */
 
 #include <Arduino.h>
