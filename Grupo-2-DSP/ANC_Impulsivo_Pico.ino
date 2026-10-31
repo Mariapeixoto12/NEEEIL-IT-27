@@ -6,7 +6,9 @@
 
   oi malta, explorei 3 tipos de fxlms como viram acima. numa pesquisa teorica, acredito que o com clipping (1) podera ser o de mais facil implementação
   e de maior eficiencia. no entanto, é algo que so iremos saber após efetuarmos os testes. por esse motivo, optei por analisar e escrever os 3 metodos.
-  para testar cada um deles, muda-se o define da linha 131 e done :)
+  para testar cada um deles, muda-se o define da linha 133 e done :)
+  alem disso, mais abaixo no codigo, ha uns valores de teste. podemos usa los para iniciar os testes, mas depois devemos calcula los para ver quais sao os
+  mais adequados.
 */
 
 #include <Arduino.h>
