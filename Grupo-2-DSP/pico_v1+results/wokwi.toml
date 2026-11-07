@@ -1,4 +1,0 @@
-[wokwi]
-version = 1
-firmware = 'build/pico_usb_denoiser.uf2'
-elf = 'build/pico_usb_denoiser.elf'

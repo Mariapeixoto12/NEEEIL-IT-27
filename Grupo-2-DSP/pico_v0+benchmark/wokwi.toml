@@ -1,4 +1,0 @@
-[wokwi]
-version = 1
-firmware = 'build/pico_spectral_subtraction_cmsis.uf2'
-elf = 'build/pico_spectral_subtraction_cmsis.elf'
