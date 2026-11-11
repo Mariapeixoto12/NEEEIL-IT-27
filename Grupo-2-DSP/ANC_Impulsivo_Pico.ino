@@ -41,7 +41,7 @@ volatile uint32_t picos_corrigidos = 0;
 
 
 // FUNCOES AUXILIARES
-int32_t modulo32(int32_t v) return (v < 0) ? -v : v;
+int32_t modulo32(int32_t v) {return (v < 0) ? -v : v};
 
 
 
@@ -115,18 +115,16 @@ uint16_t declick(uint16_t a, uint16_t b, uint16_t c, bool &corrigiu)
 uint16_t processar(uint16_t a, uint16_t b, uint16_t c) 
 {
 
-  if(MODO == 0) return b;
-  else if(MODO == 1) return mediana3(a, b, c);
-  else if (MODO == 2) return clipping(b);
-  else bool corrigiu = false;
+  if(MODO == 0) {return b};
+  else if(MODO == 1) {return mediana3(a, b, c)};
+  else if (MODO == 2) {return clipping(b)};
+  else {bool corrigiu = false};
 
   uint16_t resultado = declick(a, b, c, corrigiu);
 
   if (corrigiu) picos_corrigidos++; // corrigimos mais um pico
 
   return resultado;
-
-#endif
 }
 
 
@@ -193,9 +191,8 @@ void loop()
   Serial.print(" | Amostras: ");
   Serial.print(amostras);
 
-  if(MODO == 3) Serial.print(" | Picos corrigidos: ");
+  if(MODO == 3) {Serial.print(" | Picos corrigidos: ");}
   Serial.print(picos_corrigidos);
-  #endif
 
   Serial.println();
 }
