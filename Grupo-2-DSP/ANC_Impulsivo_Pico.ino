@@ -1,201 +1,201 @@
-/*
-  NEEEIL-IT | ANC para ruido impulsivo | Arduino IDE / Raspberry Pi Pico RP2040
-  3 modos: 0 FxLMS normal; 1 FxLMS com clipping; 2 FxLMS com thresholding.
-  microfone de referencia GP26 (ADC0), microfone de erro GP27 (ADC1),
-  GP15 PWM -> filtro RC passa-baixo e amplificador de audio externo.
-
-  oi malta, explorei 3 tipos de fxlms como viram acima. numa pesquisa teorica, acredito que o com clipping (1) podera ser o de mais facil implementação
-  e de maior eficiencia. no entanto, é algo que so iremos saber após efetuarmos os testes. por esse motivo, optei por analisar e escrever os 3 metodos.
-  para testar cada um deles, muda-se o define da linha 133 e done :)
-  alem disso, mais abaixo no codigo, ha uns valores de teste. podemos usa los para iniciar os testes, mas depois devemos calcula los para ver quais sao os
-  mais adequados.
-*/
-
 #include <Arduino.h>
-#include "hardware/adc.h" // permite controlar o conversor analog-dig da pico
-#include "hardware/pwm.h" // configura saida pwm
-#include "pico/time.h" // temporizador periodico para amostrar os microfones
-#include <math.h> 
-#include <stdint.h> // tipos inteiros
+#include "hardware/adc.h"
+#include "hardware/pwm.h"
+#include "pico/time.h"
 
-class ImpulsiveFxLMS 
-{ // esta classe vai reunir o que e necessario para o fxlms funcionar
-public:
-  enum Mode : uint8_t { BASELINE = 0, CLIPPING = 1, THRESHOLDING = 2 }; // os 3 codigos 
-  static constexpr int W = 16; // filtro adaptativo usa 16 coeficientes
-  static constexpr int S = 8; // percurso secundario (estimativa) usa 8 coeficientes
+// Escolher algoritmo:
+// 0 = Sem filtro
+// 1 = Median Filter
+// 2 = Clipping
+// 3 = Detecao + Interpolacao
 
-  explicit ImpulsiveFxLMS(Mode m = BASELINE) : mode(m) { reset(); } // define o modo (1-3) e usa reset (ver prox linhas)
+#define MODO 1 // alterem aqui o modo 
 
-  void reset() // coloca todos os coeficientes a zero, para o programa estar ok para começar
-  {
-    for (int i = 0; i < W; i++) 
-    { 
-      weights[i]=0; 
-      x_history[i]=0; 
-      xf_history[i]=0; 
-    }
+// HARDWARE
+#define PINO_ADC 27
+#define CANAL_ADC 1
+#define PINO_PWM 15
 
-    for (int i = 0; i < S; i++) clipped_history[i]=0;
+// PARAMETROS
+#define PERIODO_US 20
+#define ADC_CENTRO 2048
 
-    last_output=0; // ultima saida calculada é 0
-    last_frozen=false; // nao existe, nesse momento, uma suspensao de adaptação assinalada
-  }
+#define LIMIAR_CLIP 1200
+#define LIMIAR_PICO 450
+#define VIZINHOS_MAX_DIFF 350
 
-  void setMode(Mode m) { mode = m; }
-  void setSecondaryEstimate(const float (&coeff)[S]) // recebe os coef da estimativa do percurso sec e guarda-os num array
-  {
-    for (int i=0; i<S; i++) secondary[i]=coeff[i];
+#if MODO < 0 || MODO > 3
+#error "Escolhe MODO entre 0 e 3"
+#endif
 
-    model_ready = true; // foi fornecido um modelo
-  }
-  bool isReady() const { return model_ready; }
+uint32_t slice_num;
+uint32_t channel;
+struct repeating_timer timer_audio;
 
-  // MU, limites e amplitude sao parametros de experiencia, nao valores calibrados.
-  float mu = 0.0004f; // step size
-  float error_threshold = 0.35f; // limiar do erro para limitar erros elevados
-  float reference_threshold = 0.35f; // limitar amplitudes elevadas da ref
-  float output_limit = 0.25f; // amplitude max do sinal de saida
-  float last_output = 0; // guarda a ultima saida calculada
-  bool last_frozen = false; // a adaptação foi suspensa? 
+// Historico de amostras
+uint16_t mais_antiga = ADC_CENTRO;
+uint16_t anterior = ADC_CENTRO;
 
-  // UMA vez por amostra, depois de adquirir referencia e microfone de erro.
-  float process(float x, float e) { // x é o sinal captado pelo micro de ref; e é o erro captado pelo micro de erro
-    if (!model_ready) { last_output = 0; return 0; }
-    x = clamp(x, -1.0f, 1.0f); // clamp garante que x esta no intervalo pretendido
-    e = clamp(e, -1.0f, 1.0f); // linhas 57-60 é verificação e normalização
+volatile uint32_t amostras = 0;
+volatile uint32_t picos_corrigidos = 0;
 
-    push(x_history, W, x); // coloca a nova amostra de ref no historico, deslocando anteriores
-    float raw_output=0;
-    for (int i=0; i<W; i++) raw_output -= weights[i] * x_history[i]; // sinal de controlo gerado pelo filtro
-    const float output = clamp(raw_output, -output_limit, output_limit);
-    last_output = output;
 
-    // clipping
-    const float x_grad = (mode == CLIPPING) ?
-      clamp(x, -reference_threshold, reference_threshold) : x;
-
-    push(clipped_history, S, x_grad);
-    float xf = 0; // amostra da ref filtrada pela estimativa do percurso sec
-    for(int i=0; i<S; i++) xf += secondary[i] * clipped_history[i];
-    push(xf_history, W, xf); 
-
-    // thresholding; fabsf é valor absoluto de um float
-    last_frozen = false;
-    if (mode == THRESHOLDING &&
-        (fabsf(e) > error_threshold || fabsf(x) > reference_threshold)) {
-      last_frozen = true; // suspende-se atualização
-      return output;
-    }
-
-    // clipping do erro
-    float robust_error = (mode == CLIPPING) ?
-      clamp(e, -error_threshold, error_threshold) : e;
-
-    // proteção adicional perante saturação; aplicada aos 3 modos
-    if (fabsf(raw_output) > output_limit) {
-      last_frozen = true;
-      return output;
-    }
-
-    // atualização dos coeficientes
-    for (int i = 0; i < W; i++) weights[i] += mu * robust_error * xf_history[i];
-    return output; // antirruido calculado
-  }
-
-  float coefficientNorm() const { // norma dos coeficientes
-    float s = 0;
-    for(int i = 0; i < W; i++) s += weights[i] * weights[i];
-    return sqrtf(s);
-  } 
-
-private:
-  Mode mode;
-  bool model_ready = false;
-
-  float weights[W] = {}; // coef adaptativos do fxlms
-  float x_history[W] = {}; // historico da ref original
-  float xf_history[W] = {}; // historico da ref filtrada
-  float clipped_history[S] = {}; // historico da ref usada na adaptação
-  float secondary[S] = {}; // coef estimados do percurso sec
-  static float clamp(float v, float a, float b) {return v < a ? a : (v > b ? b : v);}
-  static void push(float *v, int n, float sample) 
-  {
-    for(int i = n-1; i>0; i--) v[i] = v[i-1];
-    v[0] = sample;
-  }
-};
+// FUNCOES AUXILIARES
+int32_t modulo32(int32_t v) return (v < 0) ? -v : v;
 
 
 
-
-// Selecionar 0, 1 ou 2 e recompilar para comparar as tres versoes.
-#define ANC_MODE 1
-// 0 = FxLMS convencional
-// 1 = FxLMS + clipping (erro e referencia para adaptacao)
-// 2 = FxLMS + thresholding (suspende adaptacao acima dos limites)
-
-#define GP_REF 26    // ADC0 - microfone referencia
-#define GP_ERROR 27  // ADC1 - microfone erro
-#define GP_PWM 15
-
-static constexpr int SAMPLE_PERIOD_US = 100; // 10 kHz, validar carga real
-ImpulsiveFxLMS anc((ImpulsiveFxLMS::Mode)ANC_MODE); // objeto anc que executará o algoritmo selecionado
-repeating_timer timer_anc; // giarda o temporizador periódico
-uint pwm_slice, pwm_channel; // bloco PWM e canal PWM, respetivamente
-volatile uint32_t samples = 0; // quantas amostras foram processadas 
-
-float adcAudio(uint8_t channel) 
+// METODO 1 - MEDIAN FILTER
+uint16_t mediana3(uint16_t a, uint16_t b, uint16_t c) 
 {
-  adc_select_input(channel); // seleciona o canal
-  uint16_t sample = adc_read(); // le um valor inteiro de 12 bits
-  return ((float)sample - 2048.0f) / 2048.0f; // valor entre -1 e 1
+    uint16_t temp;
+
+    if (a > b) 
+    {
+        temp = a;
+        a = b;
+        b = temp;
+    }
+
+    if (b > c) 
+    {
+        temp = b;
+        b = c;
+        c = temp;
+    }
+
+    if (a > b) 
+    {
+        temp = a;
+        a = b;
+        b = temp;
+    }
+
+    return b;
 }
 
-// executar uma amostra:
-bool sampleCallback(repeating_timer *timer) {
-  // o RP2040 tem um so ADC multiplexado: as leituras sao sequenciais.
-  const float x = adcAudio(0); 
-  const float e = adcAudio(1);
-  const float y = anc.process(x,e); // funcao process() que executa o fxlms escolhido
 
-  int level = (int)(512.0f + 511.0f * y);
-  if(level < 0) level = 0;
-  if(level > 1023) level = 1023; // transformam o sinal de saida num pwm de 10 bits apropriado
- 
-  pwm_set_chan_level(pwm_slice, pwm_channel, (uint16_t)level); // envia o valor calculado para canal PWM
+// METODO 2 - CLIPPING
+uint16_t clipping(uint16_t entrada) 
+{
+    int32_t v = (int32_t)entrada - ADC_CENTRO;
 
-  ++samples; // next
+    if (v > LIMIAR_CLIP) v = LIMIAR_CLIP;
+
+    if (v < -LIMIAR_CLIP) v = -LIMIAR_CLIP;
+
+    int32_t saida = v + ADC_CENTRO;
+
+    if (saida < 0) saida = 0;
+    if (saida > 4095) saida = 4095;
+
+    return (uint16_t)saida;
+}
+
+// METODO 3 - DETECAO + INTERPOLACAO
+uint16_t declick(uint16_t a, uint16_t b, uint16_t c, bool &corrigiu) 
+{
+    int32_t previsto = ((int32_t)a + (int32_t)c) / 2; // estimativa do valor central
+
+    int32_t desvio = modulo32((int32_t)b - previsto); // diferença entre o real e estimado
+
+    int32_t diferenca_vizinhos = modulo32((int32_t)a - (int32_t)c); // comparar os dois vizinhos
+  
+    corrigiu = (desvio > LIMIAR_PICO) && (diferenca_vizinhos < VIZINHOS_MAX_DIFF); // existe pico isolado?
+
+    if (corrigiu) return (uint16_t)previsto; // foi corrigido!
+
+    return b;
+}
+
+// ===========================================
+// ESCOLHER O METODO
+// ===========================================
+
+uint16_t processar(uint16_t a, uint16_t b, uint16_t c) 
+{
+
+  if(MODO == 0) return b;
+  else if(MODO == 1) return mediana3(a, b, c);
+  else if (MODO == 2) return clipping(b);
+  else bool corrigiu = false;
+
+  uint16_t resultado = declick(a, b, c, corrigiu);
+
+  if (corrigiu) picos_corrigidos++; // corrigimos mais um pico
+
+  return resultado;
+
+#endif
+}
+
+
+// INTERRUPCAO - 50 kHz
+bool timer_callback(struct repeating_timer *t) 
+{
+  (void)t;
+
+  // 1. Ler o microfone
+  uint16_t nova = adc_read();
+
+  // 2. Processar a amostra central
+  uint16_t filtrada = processar(mais_antiga, anterior, nova);
+
+  // 3. Atualizar historico
+  mais_antiga = anterior;
+  anterior = nova;
+
+  // 4. Converter ADC 12 bits para PWM 10 bits
+  pwm_set_chan_level(slice_num, channel, filtrada >> 2);
+
+  amostras++;
+
   return true;
 }
 
-void setup() {
+
+// SETUP
+void setup() 
+{
   Serial.begin(115200);
 
-  adc_init(); // inicializa o ADC
-  adc_gpio_init(GP_REF); // prepara os pinos analog
-  adc_gpio_init(GP_ERROR); // o mm de cima 
+  // ADC
+  adc_init();
+  adc_gpio_init(PINO_ADC);
+  adc_select_input(CANAL_ADC);
 
-  gpio_set_function(GP_PWM, GPIO_FUNC_PWM); // é saída PWM
-  pwm_slice = pwm_gpio_to_slice_num(GP_PWM); // bloco
-  pwm_channel = pwm_gpio_to_channel(GP_PWM); // canal
+  // PWM
+  gpio_set_function(PINO_PWM, GPIO_FUNC_PWM);
 
-  pwm_set_wrap(pwm_slice, 1023); // PWM de 0 a 1023
-  pwm_set_chan_level(pwm_slice, pwm_channel, 512); // a saida esta inicialmente a meio
-  pwm_set_enabled(pwm_slice, true); // ativa o PWM
+  slice_num = pwm_gpio_to_slice_num(PINO_PWM);
+  channel = pwm_gpio_to_channel(PINO_PWM);
 
-  if (!anc.isReady()) 
-  {
-    Serial.println("ANC bloqueado: falta calibrar S_EST. Saida em silencio DC.");
-    // por seguranca NAO inicializa timer ate calibrar modelo.
-    return;
-  }
+  pwm_set_wrap(slice_num, 1023);
 
-  if (!add_repeating_timer_us(-SAMPLE_PERIOD_US, sampleCallback, nullptr, &timer_anc)) Serial.println("Falha ao iniciar temporizador");
+  pwm_set_chan_level(slice_num, channel, ADC_CENTRO >> 2);
+
+  pwm_set_enabled(slice_num, true);
+
+  // Temporizador de 20 microssegundos
+  bool ok = add_repeating_timer_us(-PERIODO_US, timer_callback, nullptr, &timer_audio);
+
+  if (!ok) Serial.println("ERRO: temporizador");
 }
 
-void loop() {
+// LOOP
+void loop() 
+{
   delay(1000);
-  Serial.print("Amostras: "); 
-  Serial.println(samples);
+
+  Serial.print("Modo: ");
+  Serial.print(MODO);
+
+  Serial.print(" | Amostras: ");
+  Serial.print(amostras);
+
+  if(MODO == 3) Serial.print(" | Picos corrigidos: ");
+  Serial.print(picos_corrigidos);
+  #endif
+
+  Serial.println();
 }
